@@ -3,11 +3,10 @@
 import { getSupabase } from "@/lib/supabase/client";
 import {
   clearStoredPlayerId,
-  getClientId,
   getStoredPlayerId,
   setStoredPlayerId,
 } from "@/lib/client-id";
-import { findNewBingoLines } from "@/lib/bingo-lines";
+import { findNewBingoLines, hasAnyBingoLine } from "@/lib/bingo-lines";
 import confetti from "canvas-confetti";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -15,8 +14,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 type Room = {
   id: string;
   code: string;
-  status: "setup" | "playing";
+  status: "setup" | "playing" | "finished";
   created_at: string;
+  winner_player_id: string | null;
+  finished_at: string | null;
 };
 
 type RoomPlayer = {
@@ -25,6 +26,7 @@ type RoomPlayer = {
   client_id: string;
   display_name: string;
   joined_at: string;
+  normalized_name: string;
 };
 
 type BingoTask = {
@@ -40,6 +42,18 @@ type TaskCompletion = {
   room_id: string;
   done: boolean;
 };
+
+type TaskPoolItem = {
+  id: string;
+  room_id: string;
+  label: string;
+  difficulty: "easy" | "hard";
+  created_at: string;
+};
+
+const GRID_SIZE = 25;
+const HARD_CROSS_CELLS = [2, 7, 10, 11, 12, 13, 14, 17, 22];
+const EASY_CORNER_CELLS = [0, 4, 20, 24];
 
 function initialCelebrated(): Set<string> {
   return new Set();
@@ -65,6 +79,7 @@ export function RoomView({ code }: { code: string }) {
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   const [tasks, setTasks] = useState<BingoTask[]>([]);
   const [completions, setCompletions] = useState<TaskCompletion[]>([]);
+  const [pool, setPool] = useState<TaskPoolItem[]>([]);
   const [meId, setMeId] = useState<string | null>(() =>
     typeof window !== "undefined" ? getStoredPlayerId(code) : null,
   );
@@ -73,6 +88,8 @@ export function RoomView({ code }: { code: string }) {
   const [error, setError] = useState<string | null>(null);
   const [draftCell, setDraftCell] = useState<number | null>(null);
   const [draftLabel, setDraftLabel] = useState("");
+  const [poolLabel, setPoolLabel] = useState("");
+  const [poolDifficulty, setPoolDifficulty] = useState<"easy" | "hard">("easy");
   const celebratedRef = useRef<Set<string>>(initialCelebrated());
 
   const me = useMemo(
@@ -95,15 +112,17 @@ export function RoomView({ code }: { code: string }) {
     setRoom(roomRow as Room);
     const rid = roomRow.id as string;
 
-    const [{ data: pl }, { data: tk }, { data: co }] = await Promise.all([
+    const [{ data: pl }, { data: tk }, { data: co }, { data: po }] = await Promise.all([
       supabase.from("room_players").select("*").eq("room_id", rid),
       supabase.from("bingo_tasks").select("*").eq("room_id", rid).order("cell_index"),
       supabase.from("task_completions").select("*").eq("room_id", rid),
+      supabase.from("bingo_task_pool").select("*").eq("room_id", rid).order("created_at"),
     ]);
     const list = (pl ?? []) as RoomPlayer[];
     setPlayers(list);
     setTasks((tk ?? []) as BingoTask[]);
     setCompletions((co ?? []) as TaskCompletion[]);
+    setPool((po ?? []) as TaskPoolItem[]);
     setError(null);
     const stored = getStoredPlayerId(code);
     if (stored && !list.some((p) => p.id === stored)) {
@@ -214,16 +233,17 @@ export function RoomView({ code }: { code: string }) {
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!supabase || !room || !joinName.trim()) return;
-    const clientId = getClientId();
+    const normalized = joinName.trim().toLowerCase();
     const { data, error: err } = await supabase
       .from("room_players")
       .upsert(
         {
           room_id: room.id,
-          client_id: clientId,
+          client_id: normalized,
           display_name: joinName.trim(),
+          normalized_name: normalized,
         },
-        { onConflict: "room_id,client_id" },
+        { onConflict: "room_id,normalized_name" },
       )
       .select()
       .single();
@@ -258,7 +278,7 @@ export function RoomView({ code }: { code: string }) {
   };
 
   const startGame = async () => {
-    if (!supabase || !room || tasks.length !== 25) return;
+    if (!supabase || !room || tasks.length !== GRID_SIZE) return;
     const { error: err } = await supabase
       .from("rooms")
       .update({ status: "playing" })
@@ -267,8 +287,30 @@ export function RoomView({ code }: { code: string }) {
     else await fetchAll();
   };
 
+  const finishIfWinner = useCallback(
+    async (playerId: string) => {
+      if (!supabase || !room) return;
+      const doneCells = new Set<number>();
+      for (const t of tasks) {
+        if (completionMap.get(`${t.id}:${playerId}`)) doneCells.add(t.cell_index);
+      }
+      if (!hasAnyBingoLine(doneCells, tasksByCell)) return;
+      const { error: err } = await supabase
+        .from("rooms")
+        .update({
+          status: "finished",
+          winner_player_id: playerId,
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", room.id)
+        .eq("status", "playing");
+      if (err) setError(err.message);
+    },
+    [supabase, room, tasks, completionMap, tasksByCell],
+  );
+
   const toggleDone = async (taskId: string, playerId: string) => {
-    if (!supabase || !room || !me || playerId !== me.id) return;
+    if (!supabase || !room || !me || playerId !== me.id || room.status !== "playing") return;
     const key = `${taskId}:${playerId}`;
     const current = completionMap.get(key) ?? false;
     const { error: err } = await supabase.from("task_completions").upsert(
@@ -281,6 +323,79 @@ export function RoomView({ code }: { code: string }) {
       { onConflict: "task_id,player_id" },
     );
     if (err) setError(err.message);
+    else {
+      await fetchAll();
+      await finishIfWinner(playerId);
+    }
+  };
+
+  const addPoolItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase || !room) return;
+    const label = poolLabel.trim();
+    if (!label) return;
+    const { error: err } = await supabase.from("bingo_task_pool").insert({
+      room_id: room.id,
+      label,
+      difficulty: poolDifficulty,
+    });
+    if (err) setError(err.message);
+    else {
+      setPoolLabel("");
+      await fetchAll();
+    }
+  };
+
+  const removePoolItem = async (itemId: string) => {
+    if (!supabase) return;
+    const { error: err } = await supabase.from("bingo_task_pool").delete().eq("id", itemId);
+    if (err) setError(err.message);
+    else await fetchAll();
+  };
+
+  const autoFillFromPool = async () => {
+    if (!supabase || !room) return;
+    const hard = pool.filter((p) => p.difficulty === "hard");
+    const easy = pool.filter((p) => p.difficulty === "easy");
+    if (hard.length < HARD_CROSS_CELLS.length || easy.length < EASY_CORNER_CELLS.length) {
+      setError("Ajoute au moins 9 tâches dures et 4 faciles pour le préremplissage.");
+      return;
+    }
+    const shuffle = <T,>(list: T[]): T[] => [...list].sort(() => Math.random() - 0.5);
+    const hardPick = shuffle(hard).slice(0, HARD_CROSS_CELLS.length);
+    const easyPick = shuffle(easy).slice(0, EASY_CORNER_CELLS.length);
+
+    const used = new Set([...hardPick.map((t) => t.id), ...easyPick.map((t) => t.id)]);
+    const remaining = shuffle(pool.filter((p) => !used.has(p.id)));
+    const middleCells = Array.from({ length: GRID_SIZE }, (_, i) => i).filter(
+      (i) => !HARD_CROSS_CELLS.includes(i) && !EASY_CORNER_CELLS.includes(i),
+    );
+    const middlePick = remaining.slice(0, middleCells.length);
+
+    if (middlePick.length < middleCells.length) {
+      setError("Pas assez de tâches dans la pool pour remplir toute la grille.");
+      return;
+    }
+
+    const inserts: { room_id: string; cell_index: number; label: string }[] = [];
+    hardPick.forEach((item, idx) => {
+      inserts.push({ room_id: room.id, cell_index: HARD_CROSS_CELLS[idx]!, label: item.label });
+    });
+    easyPick.forEach((item, idx) => {
+      inserts.push({ room_id: room.id, cell_index: EASY_CORNER_CELLS[idx]!, label: item.label });
+    });
+    middlePick.forEach((item, idx) => {
+      inserts.push({ room_id: room.id, cell_index: middleCells[idx]!, label: item.label });
+    });
+
+    const { error: delErr } = await supabase.from("bingo_tasks").delete().eq("room_id", room.id);
+    if (delErr) {
+      setError(delErr.message);
+      return;
+    }
+    const { error: insErr } = await supabase.from("bingo_tasks").insert(inserts);
+    if (insErr) setError(insErr.message);
+    else await fetchAll();
   };
 
   if (!supabase) {
@@ -365,10 +480,16 @@ export function RoomView({ code }: { code: string }) {
             className={`rounded-full px-3 py-1 text-xs font-medium ${
               room.status === "playing"
                 ? "bg-emerald-950 text-emerald-300"
-                : "bg-amber-950 text-amber-200"
+                : room.status === "finished"
+                  ? "bg-purple-950 text-purple-300"
+                  : "bg-amber-950 text-amber-200"
             }`}
           >
-            {room.status === "playing" ? "En cours" : "Préparation"}
+            {room.status === "playing"
+              ? "En cours"
+              : room.status === "finished"
+                ? "Terminé"
+                : "Préparation"}
           </span>
           <Link
             href="/"
@@ -381,15 +502,70 @@ export function RoomView({ code }: { code: string }) {
 
       {error ? <p className="mb-4 text-sm text-red-400">{error}</p> : null}
 
+      {room.status === "finished" && (
+        <div className="mb-6 rounded-xl border border-purple-700/40 bg-purple-950/30 p-4 text-sm text-purple-100">
+          Partie terminée :{" "}
+          <span className="font-semibold">
+            {players.find((p) => p.id === room.winner_player_id)?.display_name ?? "Gagnant inconnu"}
+          </span>{" "}
+          a gagné.
+        </div>
+      )}
+
       {room.status === "setup" && (
         <section className="mb-10">
-          <h2 className="mb-2 text-lg font-medium text-zinc-200">Remplis les 25 cases</h2>
+          <h2 className="mb-2 text-lg font-medium text-zinc-200">
+            Prépare la grille et la pool de tâches
+          </h2>
           <p className="mb-4 text-sm text-zinc-500">
-            Clique une case pour éditer. Quand les 25 sont remplies, lance la partie — chacun
-            coche ce qu&apos;il a fait, les autres voient les pastilles en direct.
+            Tu peux ajouter plus de 25 tâches. Le bouton de préremplissage place les tâches
+            dures en croix et les faciles dans les coins.
           </p>
+          <form onSubmit={addPoolItem} className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
+            <input
+              value={poolLabel}
+              onChange={(e) => setPoolLabel(e.target.value)}
+              placeholder="Nouvelle tâche dans la pool"
+              className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:ring-2 focus:ring-emerald-500/40"
+            />
+            <select
+              value={poolDifficulty}
+              onChange={(e) => setPoolDifficulty(e.target.value as "easy" | "hard")}
+              className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none"
+            >
+              <option value="easy">Facile</option>
+              <option value="hard">Difficile</option>
+            </select>
+            <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white">
+              Ajouter
+            </button>
+          </form>
+          <div className="mb-5 flex flex-wrap gap-2">
+            {pool.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => void removePoolItem(item.id)}
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  item.difficulty === "hard"
+                    ? "border-rose-700/50 bg-rose-950/30 text-rose-200"
+                    : "border-cyan-700/50 bg-cyan-950/30 text-cyan-200"
+                }`}
+                title="Supprimer"
+              >
+                {item.label} ×
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => void autoFillFromPool()}
+            className="mb-5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+          >
+            Préremplir (croix difficile + coins faciles)
+          </button>
           <div className="grid grid-cols-5 gap-2 sm:gap-3">
-            {Array.from({ length: 25 }, (_, i) => {
+            {Array.from({ length: GRID_SIZE }, (_, i) => {
               const t = tasksByCell.get(i);
               return (
                 <button
@@ -443,21 +619,21 @@ export function RoomView({ code }: { code: string }) {
           <div className="mt-6 flex flex-wrap items-center gap-4">
             <button
               type="button"
-              disabled={tasks.length !== 25}
+              disabled={tasks.length !== GRID_SIZE}
               onClick={() => void startGame()}
               className="rounded-xl bg-emerald-600 px-6 py-3 font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Lancer le bingo
             </button>
             <span className="text-sm text-zinc-500">
-              {tasks.length}/25 cases · {sortedPlayers.length} joueur
+              {tasks.length}/{GRID_SIZE} cases · pool {pool.length} tâches · {sortedPlayers.length} joueur
               {sortedPlayers.length > 1 ? "s" : ""}
             </span>
           </div>
         </section>
       )}
 
-      {room.status === "playing" && (
+      {(room.status === "playing" || room.status === "finished") && (
         <section>
           <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-zinc-500">
             <span>Légende :</span>
@@ -478,7 +654,7 @@ export function RoomView({ code }: { code: string }) {
             ))}
           </div>
           <div className="grid grid-cols-5 gap-2 sm:gap-3">
-            {Array.from({ length: 25 }, (_, i) => {
+            {Array.from({ length: GRID_SIZE }, (_, i) => {
               const t = tasksByCell.get(i);
               if (!t) {
                 return (
@@ -504,7 +680,7 @@ export function RoomView({ code }: { code: string }) {
                         <button
                           key={p.id}
                           type="button"
-                          disabled={!isMe}
+                          disabled={!isMe || room.status !== "playing"}
                           title={isMe ? "Cocher pour toi" : p.display_name}
                           onClick={() => void toggleDone(t.id, p.id)}
                           className={`flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold transition ${

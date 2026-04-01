@@ -42,3 +42,12 @@ export function findNewBingoLines(
   }
   return newLines;
 }
+
+export function hasAnyBingoLine(doneCells: Set<number>, tasksByCell: Map<number, unknown>): boolean {
+  for (const line of LINES) {
+    const cellsInPlay = line.filter((c) => tasksByCell.has(c));
+    if (cellsInPlay.length < 5) continue;
+    if (cellsInPlay.every((c) => doneCells.has(c))) return true;
+  }
+  return false;
+}

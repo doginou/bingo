@@ -310,7 +310,15 @@ export function RoomView({ code }: { code: string }) {
   );
 
   const toggleDone = async (taskId: string, playerId: string) => {
-    if (!supabase || !room || !me || playerId !== me.id || room.status !== "playing") return;
+    if (
+      !supabase ||
+      !room ||
+      !me ||
+      playerId !== me.id ||
+      (room.status !== "playing" && room.status !== "finished")
+    ) {
+      return;
+    }
     const key = `${taskId}:${playerId}`;
     const current = completionMap.get(key) ?? false;
     const { error: err } = await supabase.from("task_completions").upsert(
@@ -680,7 +688,7 @@ export function RoomView({ code }: { code: string }) {
                         <button
                           key={p.id}
                           type="button"
-                          disabled={!isMe || room.status !== "playing"}
+                          disabled={!isMe || room.status === "setup"}
                           title={isMe ? "Cocher pour toi" : p.display_name}
                           onClick={() => void toggleDone(t.id, p.id)}
                           className={`flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold transition ${

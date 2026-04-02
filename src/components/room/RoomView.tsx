@@ -221,6 +221,16 @@ export function RoomView({ code }: { code: string }) {
     return m;
   }, [completions]);
 
+  const { poolEasyCount, poolHardCount } = useMemo(() => {
+    let easy = 0;
+    let hard = 0;
+    for (const item of pool) {
+      if (item.difficulty === "easy") easy += 1;
+      else hard += 1;
+    }
+    return { poolEasyCount: easy, poolHardCount: hard };
+  }, [pool]);
+
   useEffect(() => {
     if (!room || room.status !== "playing" || !me) return;
     const doneCells = new Set<number>();
@@ -574,13 +584,25 @@ export function RoomView({ code }: { code: string }) {
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={() => void autoFillFromPool()}
-            className="mb-5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
-          >
-            Préremplir (X difficile + bords faciles, centre libre)
-          </button>
+          <div className="mb-5 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void autoFillFromPool()}
+              className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+            >
+              Préremplir (X difficile + bords faciles, centre libre)
+            </button>
+            <p className="text-sm text-zinc-500">
+              <span className="text-cyan-200/90">
+                {poolEasyCount} facile{poolEasyCount !== 1 ? "s" : ""}
+              </span>
+              <span className="mx-1.5 text-zinc-600">·</span>
+              <span className="text-rose-200/90">
+                {poolHardCount} dur{poolHardCount !== 1 ? "s" : ""}
+              </span>
+              <span className="text-zinc-600"> dans la pool</span>
+            </p>
+          </div>
           <div className="grid grid-cols-5 gap-2 sm:gap-3">
             {Array.from({ length: GRID_SIZE }, (_, i) => {
               const t = tasksByCell.get(i);

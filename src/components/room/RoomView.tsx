@@ -52,8 +52,12 @@ type TaskPoolItem = {
 };
 
 const GRID_SIZE = 25;
-const HARD_CROSS_CELLS = [2, 7, 10, 11, 12, 13, 14, 17, 22];
-const EASY_CORNER_CELLS = [0, 4, 20, 24];
+/** Case centrale (ligne du milieu) : jamais préremplie — à choisir à la main (souvent l’ultra dur). */
+const GRID_CENTER_INDEX = 12;
+/** Diagonales en X sans le centre : 8 cases « difficiles ». */
+const HARD_X_CELLS = [0, 4, 6, 8, 16, 18, 20, 24];
+/** Quatre cases faciles, hors X et hors centre (milieux de bords). */
+const EASY_WING_CELLS = [2, 10, 14, 22];
 
 function initialCelebrated(): Set<string> {
   return new Set();
@@ -365,18 +369,21 @@ export function RoomView({ code }: { code: string }) {
     if (!supabase || !room) return;
     const hard = pool.filter((p) => p.difficulty === "hard");
     const easy = pool.filter((p) => p.difficulty === "easy");
-    if (hard.length < HARD_CROSS_CELLS.length || easy.length < EASY_CORNER_CELLS.length) {
-      setError("Ajoute au moins 9 tâches dures et 4 faciles pour le préremplissage.");
+    if (hard.length < HARD_X_CELLS.length || easy.length < EASY_WING_CELLS.length) {
+      setError("Ajoute au moins 8 tâches dures et 4 faciles pour le préremplissage.");
       return;
     }
     const shuffle = <T,>(list: T[]): T[] => [...list].sort(() => Math.random() - 0.5);
-    const hardPick = shuffle(hard).slice(0, HARD_CROSS_CELLS.length);
-    const easyPick = shuffle(easy).slice(0, EASY_CORNER_CELLS.length);
+    const hardPick = shuffle(hard).slice(0, HARD_X_CELLS.length);
+    const easyPick = shuffle(easy).slice(0, EASY_WING_CELLS.length);
 
     const used = new Set([...hardPick.map((t) => t.id), ...easyPick.map((t) => t.id)]);
     const remaining = shuffle(pool.filter((p) => !used.has(p.id)));
     const middleCells = Array.from({ length: GRID_SIZE }, (_, i) => i).filter(
-      (i) => !HARD_CROSS_CELLS.includes(i) && !EASY_CORNER_CELLS.includes(i),
+      (i) =>
+        !HARD_X_CELLS.includes(i) &&
+        !EASY_WING_CELLS.includes(i) &&
+        i !== GRID_CENTER_INDEX,
     );
     const middlePick = remaining.slice(0, middleCells.length);
 
@@ -387,10 +394,10 @@ export function RoomView({ code }: { code: string }) {
 
     const inserts: { room_id: string; cell_index: number; label: string }[] = [];
     hardPick.forEach((item, idx) => {
-      inserts.push({ room_id: room.id, cell_index: HARD_CROSS_CELLS[idx]!, label: item.label });
+      inserts.push({ room_id: room.id, cell_index: HARD_X_CELLS[idx]!, label: item.label });
     });
     easyPick.forEach((item, idx) => {
-      inserts.push({ room_id: room.id, cell_index: EASY_CORNER_CELLS[idx]!, label: item.label });
+      inserts.push({ room_id: room.id, cell_index: EASY_WING_CELLS[idx]!, label: item.label });
     });
     middlePick.forEach((item, idx) => {
       inserts.push({ room_id: room.id, cell_index: middleCells[idx]!, label: item.label });
@@ -526,8 +533,10 @@ export function RoomView({ code }: { code: string }) {
             Prépare la grille et la pool de tâches
           </h2>
           <p className="mb-4 text-sm text-zinc-500">
-            Tu peux ajouter plus de 25 tâches. Le bouton de préremplissage place les tâches
-            dures en croix et les faciles dans les coins.
+            Tu peux ajouter plus de 25 tâches. Le préremplissage place les dures en{" "}
+            <strong className="font-medium text-zinc-400">X</strong> (diagonales, sans le milieu), les
+            faciles sur les bords, et laisse la case du centre pour toi — en général la seule ligne où
+            un bingo peut passer avec une seule case difficile, donc mets-y le défi le plus cruel.
           </p>
           <form onSubmit={addPoolItem} className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
             <input
@@ -570,11 +579,12 @@ export function RoomView({ code }: { code: string }) {
             onClick={() => void autoFillFromPool()}
             className="mb-5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
           >
-            Préremplir (croix difficile + coins faciles)
+            Préremplir (X difficile + bords faciles, centre libre)
           </button>
           <div className="grid grid-cols-5 gap-2 sm:gap-3">
             {Array.from({ length: GRID_SIZE }, (_, i) => {
               const t = tasksByCell.get(i);
+              const isCenter = i === GRID_CENTER_INDEX;
               return (
                 <button
                   key={i}
@@ -583,11 +593,17 @@ export function RoomView({ code }: { code: string }) {
                     setDraftCell(i);
                     setDraftLabel(t?.label ?? "");
                   }}
-                  className="flex min-h-[72px] flex-col items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900/50 p-2 text-center transition hover:border-zinc-600 hover:bg-zinc-900"
+                  className={`flex min-h-[72px] flex-col items-center justify-center rounded-xl border bg-zinc-900/50 p-2 text-center transition hover:bg-zinc-900 ${
+                    isCenter
+                      ? "border-amber-700/40 ring-1 ring-amber-500/25 hover:border-amber-600/50"
+                      : "border-zinc-800 hover:border-zinc-600"
+                  }`}
                 >
-                  <span className="text-[10px] font-mono text-zinc-600">{i + 1}</span>
+                  <span className="text-[10px] font-mono text-zinc-600">
+                    {isCenter ? "★" : i + 1}
+                  </span>
                   <span className="line-clamp-3 text-xs font-medium leading-tight text-zinc-200">
-                    {t?.label ?? "＋"}
+                    {t?.label ?? (isCenter ? "Centre (à toi)" : "＋")}
                   </span>
                 </button>
               );
@@ -596,12 +612,21 @@ export function RoomView({ code }: { code: string }) {
           {draftCell !== null && (
             <div className="mt-6 flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/80 p-4 sm:flex-row sm:items-end">
               <div className="flex-1">
-                <label className="mb-1 block text-xs text-zinc-500">Case {draftCell + 1}</label>
+                <label className="mb-1 block text-xs text-zinc-500">
+                  Case {draftCell + 1}
+                  {draftCell === GRID_CENTER_INDEX ? (
+                    <span className="ml-2 text-amber-600/90">· centre — souvent l’ultra dur</span>
+                  ) : null}
+                </label>
                 <input
                   value={draftLabel}
                   onChange={(e) => setDraftLabel(e.target.value)}
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:ring-2 focus:ring-emerald-500/40"
-                  placeholder="Ex : Manger du renne"
+                  placeholder={
+                    draftCell === GRID_CENTER_INDEX
+                      ? "Ex : Boss final — le truc quasi impossible"
+                      : "Ex : Manger du renne"
+                  }
                   autoFocus
                 />
               </div>
